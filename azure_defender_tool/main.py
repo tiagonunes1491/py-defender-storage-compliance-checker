@@ -28,7 +28,10 @@ logger = setup_logger("AzureDefenderTool") # Use a root name for the tool
 def main():
     """Main execution function: Loads config, initializes clients, processes resources."""
     logger.info("Script starting.")
-    load_dotenv()
+    if os.environ.get("FUNCTIONS_WORKER_RUNTIME") is None:
+        from dotenv import load_dotenv
+        logger.info("Not in Azure Functions environment, loading .env file.")
+        load_dotenv()
 
     # --- Configuration Loading and Validation ---
     logger.info("Loading configuration from environment variables...")
@@ -47,7 +50,7 @@ def main():
 
     if missing_vars:
         logger.critical(f"Missing required configuration: {', '.join(missing_vars)}. Exiting.")
-        sys.exit(1)
+        return False
 
     try:
         set_storage_accounts = set(name.strip() for name in storage_accounts_str.split(',') if name.strip())
@@ -55,7 +58,7 @@ def main():
             raise ValueError("TARGET_STORAGE_ACCOUNTS cannot be empty.")
     except Exception as e:
         logger.critical(f"Invalid TARGET_STORAGE_ACCOUNTS format: {e}. Exiting.")
-        sys.exit(1)
+        return False
 
     remediation_enabled = remediation_enabled_str.lower() == "true"
 
@@ -148,10 +151,4 @@ def main():
 
     logger.info(f"Successfully attempted processing for {processed_accounts_count} target storage account(s).")
     logger.info("Script finished.")
-
-
-# --- Script Entry Point ---
-if __name__ == "__main__":
-    # Ensure logger is setup before main logic runs
-    # setup_logger("AzureDefenderTool") # Setup called at top level now
-    main()
+    return True
