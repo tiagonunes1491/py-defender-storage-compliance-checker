@@ -1,0 +1,8 @@
+azure-identity
+azure-mgmt-resource
+azure-mgmt-security
+azure-mgmt-storage
+azure-mgmt-monitor
+azure-monitor-ingestion
+azure-functions # Usually needed for Function App context/triggers
+dotenv
