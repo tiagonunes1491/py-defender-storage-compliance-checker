@@ -5,27 +5,22 @@ import sys
 
 # Third-Party Imports
 from dotenv import load_dotenv
-from azure.core.exceptions import HttpResponseError
+# Corrected: Import ResourceNotFoundError specifically if needed, otherwise just HttpResponseError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.monitor import MonitorManagementClient
 from azure.mgmt.monitor.models import DiagnosticSettingsResource, LogSettings
 from azure.mgmt.resource import ResourceManagementClient
-# Import Resource type for type hinting if desired
-# from azure.mgmt.resource.resources.v2022_09_01.models import GenericResourceExpanded as Resource
 from azure.mgmt.security import SecurityCenter
-# Import specific models needed for payload construction and type hints
-from azure.mgmt.security.models import (
-    DefenderForStorageSetting,
-    MalwareScanningProperties,
-    MalwareScanningOnUploadProperties
-)
+# --- Constraint: This import is kept exactly as requested ---
+from azure.mgmt.security.models import DefenderForStorageSetting # Keep for type hints/payload
+# --- End Constraint ---
 
 # --- Constants ---
 DEFENDER_SETTING_NAME = "current"
 DIAGNOSTIC_SETTING_NAME = "service"
 STORAGE_ACCOUNT_TYPE = "Microsoft.Storage/storageAccounts"
 LOG_CATEGORY_SCAN_RESULTS = "ScanResults"
-# ---------------
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -40,28 +35,19 @@ if not logger.handlers:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     logger.propagate = False
-# --- End Logger Setup ---
 
+# --- Helper Functions ---
 
 def get_current_subscription_id():
-    """Retrieves the Azure Subscription ID for the execution environment.
-
-    Primarily checks the 'AZURE_SUBSCRIPTION_ID' environment variable.
-    As a fallback for Azure Function App environments, attempts to parse
-    the ID from the 'WEBSITE_OWNER_NAME' environment variable.
-
-    Returns:
-        str | None: The 36-character Azure Subscription ID if found and valid,
-                    otherwise None.
-    """
+    """Retrieves the Azure Subscription ID for the execution environment."""
+    # ... (function remains the same as previous version) ...
     subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
     if subscription_id:
-        logger.info("Using Azure Subscription ID from AZURE_SUBSCRIPTION_ID variable (recommended).")
+        logger.info("Using Azure Subscription ID from AZURE_SUBSCRIPTION_ID.")
         if len(subscription_id) == 36:
             return subscription_id
         else:
-            logger.warning(f"AZURE_SUBSCRIPTION_ID value found but is not 36 characters long: '{subscription_id}'. Will attempt fallback.")
-            # Fallthrough intended
+            logger.warning(f"AZURE_SUBSCRIPTION_ID value is not 36 characters: '{subscription_id}'. Attempting fallback.")
 
     website_owner = os.environ.get("WEBSITE_OWNER_NAME")
     if website_owner:
@@ -72,310 +58,282 @@ def get_current_subscription_id():
                 logger.info("Successfully parsed Subscription ID from WEBSITE_OWNER_NAME.")
                 return parsed_id
             else:
-                logger.error(f"Parsed ID from WEBSITE_OWNER_NAME is not 36 characters long: '{parsed_id}'")
+                logger.error(f"Parsed ID from WEBSITE_OWNER_NAME is not 36 characters: '{parsed_id}'")
                 return None
         except Exception as e:
-             logger.error(f'Could not parse subscription ID from WEBSITE_OWNER_NAME ({website_owner}). Error: {e}')
-             return None
+            logger.error(f'Could not parse subscription ID from WEBSITE_OWNER_NAME ({website_owner}). Error: {e}')
+            return None
     else:
-        # Only log error if AZURE_SUBSCRIPTION_ID was also missing/invalid
-        if not subscription_id:
+        if not subscription_id: # Only log error if both methods failed
              logger.error("Unable to determine valid Subscription ID using AZURE_SUBSCRIPTION_ID or WEBSITE_OWNER_NAME.")
         return None
 
+# --- Core Logic Functions ---
 
-def check_compliance(security_client: SecurityCenter, monitor_client: MonitorManagementClient, resource, expected_workspace_id: str) -> tuple[dict, DiagnosticSettingsResource | None, DefenderForStorageSetting | None]:
-    """Checks Defender for Storage and Diagnostic settings compliance for a storage account.
-
-    Retrieves the current Defender for Storage settings and its associated
-    diagnostic settings, comparing them against expected states (enabled, override,
-    malware scan, specific workspace ID). Uses safe attribute access.
-
-    Args:
-        security_client: An authenticated SecurityCenter client.
-        monitor_client: An authenticated MonitorManagementClient.
-        resource: The storage account resource object.
-        expected_workspace_id: The resource ID of the expected Log Analytics workspace.
-
-    Returns:
-        tuple: A tuple containing:
-            - dict: Compliance results (check_results) with boolean status per check.
-            - DiagnosticSettingsResource | None: The retrieved diagnostic setting object,
-              or None if retrieval failed or not applicable.
-            - DefenderForStorageSetting | None: The retrieved defender setting object,
-              or None if the initial retrieval failed critically.
-              Returns (dict_all_false, None, None) on critical failure retrieving defender settings.
-    """
+# --- check_compliance using EXACT attribute names from user's working code ---
+def check_compliance(security_client: SecurityCenter, monitor_client: MonitorManagementClient, resource, expected_workspace_id: str):
+    """Checks compliance using specific attribute names confirmed by user."""
     check_results = {
-        "Defender_for_storage_enabled": False, # Default to False
-        "Override_enabled": False,
-        "Malware_scanning_on_upload": False,
-        "WorkspaceID": False
+        "Defender_for_storage_enabled": None, # Start as None, set based on retrieved value
+        "Override_enabled": None,
+        "Malware_scanning_on_upload": None,
+        "WorkspaceID": None
     }
-    logger.info(f"  -> Checking compliance for target account: {resource.name}")
-    diagnostic_setting: DiagnosticSettingsResource | None = None
-    defender_setting: DefenderForStorageSetting | None = None
+    resource_name = resource.name
+    resource_id = resource.id
+    logger.info(f" -> Checking compliance for target account: {resource_name}")
+    defender_setting = None
+    diagnostic_setting = None
 
     try:
+        # 1. Fetch Defender for Storage settings
         defender_setting = security_client.defender_for_storage.get(
             resource_id=resource.id,
             setting_name=DEFENDER_SETTING_NAME
         )
 
-        # Use getattr for safe access to potentially missing attributes/nested objects
-        check_results["Defender_for_storage_enabled"] = getattr(defender_setting, 'is_enabled', False)
+        # 2. Check settings using the exact attribute names provided by the user
+        #    Using getattr for safety in case an attribute is unexpectedly missing
+        check_results["Defender_for_storage_enabled"] = getattr(defender_setting, 'is_enabled_properties_is_enabled', False)
         check_results["Override_enabled"] = getattr(defender_setting, 'override_subscription_level_settings', False)
+        check_results["Malware_scanning_on_upload"] = getattr(defender_setting, 'is_enabled_properties_malware_scanning_on_upload_is_enabled', False)
 
-        malware_scanning = getattr(defender_setting, 'malware_scanning', None)
-        on_upload = getattr(malware_scanning, 'on_upload', None) if malware_scanning else None
-        check_results["Malware_scanning_on_upload"] = getattr(on_upload, 'is_enabled', False) if on_upload else False
-
-        # Nested try for diagnostic settings
-        # Construct ID using the retrieved defender_setting ID for robustness if available
-        defender_setting_resource_id = f"{getattr(defender_setting, 'id', resource.id + '/providers/Microsoft.Security/DefenderForStorageSettings/current')}"
-
+        # 3. Fetch associated Diagnostic settings
+        defender_setting_resource_id = f"{resource.id}/providers/Microsoft.Security/DefenderForStorageSettings/current"
+        diagnostic_setting_name = DIAGNOSTIC_SETTING_NAME
         try:
             diagnostic_setting = monitor_client.diagnostic_settings.get(
                 resource_uri=defender_setting_resource_id,
-                name=DIAGNOSTIC_SETTING_NAME
+                name=diagnostic_setting_name
             )
-            retrieved_workspace_id = getattr(diagnostic_setting, 'workspace_id', None)
-            check_results["WorkspaceID"] = (retrieved_workspace_id is not None and retrieved_workspace_id.lower() == expected_workspace_id.lower())
+            # Using getattr for safety, comparing case-insensitively
+            current_workspace_id = getattr(diagnostic_setting, 'workspace_id', None)
+            check_results["WorkspaceID"] = (current_workspace_id is not None and current_workspace_id.lower() == expected_workspace_id.lower())
 
-        except HttpResponseError as hre:
-            if hre.status_code == 404:
-                logger.warning(f"      -> Diagnostic setting '{DIAGNOSTIC_SETTING_NAME}' not found for Defender for Storage on {resource.name}.")
-                # WorkspaceID remains False
-            else:
-                 logger.error(f"      -> Error retrieving monitoring details for {resource.name} (HTTP {hre.status_code}). {hre.message}")
-            diagnostic_setting = None # Ensure None on error
-            check_results["WorkspaceID"] = False # Explicitly False on error
+        except ResourceNotFoundError:
+             # Changed log level to INFO as missing setting might be expected before remediation
+             logger.info(f"Diagnostic setting '{diagnostic_setting_name}' not found for Defender for Storage on {resource_name}.")
+             check_results["WorkspaceID"] = False
+             diagnostic_setting = None # Ensure it's None if not found
         except Exception as e:
-            logger.error(f"      -> Unexpected error retrieving monitoring details for {resource.name}. {e}")
-            diagnostic_setting = None # Ensure None on error
-            check_results["WorkspaceID"] = False # Explicitly False on error
+            logger.error(f"Error retrieving diagnostic setting for {resource_name}: {e}")
+            check_results["WorkspaceID"] = False
+            diagnostic_setting = None # Ensure it's None on error
 
+        # If all checks were successful, return the retrieved objects
         return check_results, diagnostic_setting, defender_setting
 
-    except HttpResponseError as hre:
-        if hre.status_code == 404:
-            logger.warning(f"   -> Defender for Storage setting '{DEFENDER_SETTING_NAME}' not found for {resource.name}. Treating as non-compliant. {hre.message}")
-        elif hre.status_code == 403:
-             logger.error(f"   -> PERMISSION ERROR retrieving security details for {resource.name}. Check identity permissions. {hre.message}")
-        else:
-             logger.error(f"   -> HTTP ERROR {hre.status_code} retrieving security details for {resource.name}. {hre.message}")
-        # Mark all checks as failed/indeterminate (already defaulted to False)
-        return check_results, None, None # Return predictable tuple
-
+    except AttributeError as e:
+         # Catch if the specific attributes the user confirmed are missing
+         logger.error(f"Attribute error accessing expected Defender settings for {resource_name}: {e}. Please double-check the attribute names in the script vs. the object returned by the SDK.", exc_info=True)
+         check_results = {key: False for key in check_results} # Mark all as failed
+         return check_results, None, defender_setting # Return potentially incomplete object
+    except HttpResponseError as e:
+        logger.error(f"Azure API error retrieving Defender settings for {resource_name}: {e.message}")
+        check_results = {key: False for key in check_results}
+        return check_results, None, None
     except Exception as e:
-        logger.error(f"   -> UNEXPECTED ERROR retrieving security details for {resource.name}. Error: {e}")
-        # Mark all checks as failed/indeterminate (already defaulted to False)
-        return check_results, None, None # Return predictable tuple
+        logger.error(f"Unexpected error retrieving Defender settings for {resource_name} (ID: {resource_id}): {e}", exc_info=True)
+        check_results = {key: False for key in check_results}
+        return check_results, None, None
 
 
-def remediation_orchestrator(security_client: SecurityCenter, defender_setting: DefenderForStorageSetting, monitor_client: MonitorManagementClient, resource, check_results: dict, expected_workspace_id: str) -> None:
-    """Remediates non-compliant Defender for Storage and Diagnostic settings.
+# --- remediation_orchestrator using EXACT attribute names from user's working code ---
+def remediation_orchestrator(security_client: SecurityCenter, defender_settings: DefenderForStorageSetting, monitor_client: MonitorManagementClient, resource, check_results: dict, expected_workspace_id: str):
+    """Remediates settings using specific attribute names confirmed by user."""
+    storage_account_name = resource.name
+    resource_id = resource.id
 
-    Enables Defender for Storage, malware scanning, overrides subscription settings,
-    and configures diagnostic settings to send scan results to the specified workspace
-    if the corresponding checks in 'check_results' are False. Uses modern SDK models.
+    # Check if Defender settings need update
+    if not check_results.get("Defender_for_storage_enabled", True) or \
+       not check_results.get("Override_enabled", True) or \
+       not check_results.get("Malware_scanning_on_upload", True):
 
-    Args:
-        security_client: An authenticated SecurityCenter client.
-        defender_setting: The current defender setting object retrieved earlier.
-        monitor_client: An authenticated MonitorManagementClient.
-        resource: The storage account resource object.
-        check_results: A dictionary containing the boolean compliance results.
-        expected_workspace_id: The resource ID of the target Log Analytics workspace.
-
-    Returns:
-        None: This function performs actions and logs results/errors.
-    """
-    # Part 1: Remediate Defender for Storage base settings if needed
-    if not check_results["Defender_for_storage_enabled"] or \
-       not check_results["Override_enabled"] or \
-       not check_results["Malware_scanning_on_upload"]:
-
-        logger.info(f"   -> Remediating Defender for Storage base settings for {resource.name}...")
-
-        # --- Define the desired state explicitly using SDK models ---
-        # Ensure MalwareScanning structure exists before setting nested property
-        malware_scanning_config = MalwareScanningProperties(
-            on_upload=MalwareScanningOnUploadProperties(is_enabled=True),
-            scan_results_event_grid_topic_resource_id=getattr(getattr(defender_setting, 'malware_scanning', None), 'scan_results_event_grid_topic_resource_id', None) # Preserve existing Event Grid topic if set
-        )
-
-        desired_defender_settings = DefenderForStorageSetting(
-            is_enabled=True,
-            override_subscription_level_settings=True,
-            malware_scanning=malware_scanning_config
-            # Note: Other properties from defender_setting are not included here
-            # unless explicitly needed for the update/create operation.
-            # If the API requires the full object, merge with defender_setting first.
-            # Assuming create only needs these core properties for update.
-        )
+        logger.info(f" -> Remediating Defender for Storage plan settings for {storage_account_name}...")
+        setting_name = DEFENDER_SETTING_NAME # Use constant
 
         try:
-            # Use create_or_update if available, otherwise create should work for update
-            updated_setting = security_client.defender_for_storage.create(
-                resource_id=resource.id,
-                setting_name=DEFENDER_SETTING_NAME,
-                defender_for_storage_setting=desired_defender_settings # Pass the desired payload
+            # Set attributes using the exact names provided by the user
+            defender_settings.is_enabled_properties_is_enabled = True
+            defender_settings.override_subscription_level_settings = True
+            defender_settings.is_enabled_properties_malware_scanning_on_upload_is_enabled = True
+
+            # Attempt the update call
+            security_client.defender_for_storage.create(
+                resource_id=resource_id,
+                setting_name=setting_name,
+                defender_for_storage_setting=defender_settings
             )
-            logger.info(f"      -> Remediated Defender for Storage base settings. New state enabled: {getattr(updated_setting, 'is_enabled', 'N/A')}")
-        except HttpResponseError as hre:
-             logger.error(f"      -> Update for Defender for Storage base settings failed (HTTP {hre.status_code}). {hre.message}")
+            logger.info(f"    -> Remediated Defender for Storage settings for {storage_account_name}.")
+
+        except AttributeError as e:
+             # Catch if the specific attributes the user confirmed are missing during assignment
+             logger.error(f"    -> Attribute error setting expected Defender attributes for {storage_account_name}: {e}. Update failed.", exc_info=True)
         except Exception as e:
-            logger.error(f"      -> Update for Defender for Storage base settings failed. {e}")
+            logger.error(f"    -> FAILED to update Defender for Storage settings for {storage_account_name}. Error: {e}", exc_info=True)
 
-    # Part 2: Remediate Diagnostic Settings if needed
-    if not check_results["WorkspaceID"]:
-        logger.info(f"   -> Remediating Defender for Storage diagnostic settings for {resource.name}...")
-        # Use the ID from the actual defender setting object if possible
-        defender_setting_resource_id = getattr(defender_setting, 'id', f"{resource.id}/providers/Microsoft.Security/DefenderForStorageSettings/{DEFENDER_SETTING_NAME}")
-
+    # Check if Diagnostic settings need update
+    if not check_results.get("WorkspaceID", True):
+        logger.info(f" -> Remediating Diagnostic Setting for {storage_account_name}...")
+        defender_setting_resource_id = f"{resource_id}/providers/Microsoft.Security/DefenderForStorageSettings/{DEFENDER_SETTING_NAME}" # Use constant
+        diagnostic_setting_name = DIAGNOSTIC_SETTING_NAME # Use constant
         logs_to_send = [
+            # Ensure category name is correct - using constant
             LogSettings(category=LOG_CATEGORY_SCAN_RESULTS, enabled=True)
+            # If ScanResults is a category group, use:
+            # LogSettings(category_group=LOG_CATEGORY_SCAN_RESULTS, enabled=True)
         ]
-        desired_diagnostic_payload = DiagnosticSettingsResource(
+        desired_setting_payload = DiagnosticSettingsResource(
             workspace_id=expected_workspace_id,
             logs=logs_to_send,
-            metrics=[] # Assuming no metrics needed
+            metrics=[] # Explicitly empty
         )
         try:
-            updated_diag = monitor_client.diagnostic_settings.create_or_update(
+            monitor_client.diagnostic_settings.create_or_update(
                 resource_uri=defender_setting_resource_id,
-                name=DIAGNOSTIC_SETTING_NAME,
-                parameters=desired_diagnostic_payload
+                name=diagnostic_setting_name,
+                parameters=desired_setting_payload
             )
-            logger.info(f"      -> Remediated Defender for Storage diagnostic settings. Workspace ID: {getattr(updated_diag, 'workspace_id', 'N/A')}")
-        except HttpResponseError as hre:
-             logger.error(f"      -> Update for Defender for Storage diagnostic settings failed (HTTP {hre.status_code}). {hre.message}")
+            # Changed level to INFO for successful remediation
+            logger.info(f"    -> Remediated Diagnostic Setting for {storage_account_name} to use workspace.")
         except Exception as e:
-            logger.error(f"      -> Update for Defender for Storage diagnostic settings failed. {e}")
+            logger.error(f"    -> FAILED to update Diagnostic Setting for {storage_account_name}. Error: {e}", exc_info=True)
 
+
+# --- Main Execution ---
 
 def main():
-    """Main execution function.
+    """Main execution function: Loads config, initializes clients, processes resources."""
+    logger.info("Script starting.")
+    load_dotenv()
 
-    Initializes Azure clients, reads configuration from environment variables,
-    iterates through specified storage accounts in a target resource group,
-    checks their Defender for Storage compliance, and triggers remediation
-    if enabled and necessary.
-    """
-    load_dotenv() # Load .env file first if present
-    logger.info("Function starting.")
-
-    # --- Get Subscription ID ---
-    subscription_id = get_current_subscription_id()
-    if not subscription_id:
-        logger.critical("Azure Subscription ID could not be determined. Exiting.")
-        sys.exit(1)
-    logger.info(f"Using Subscription ID: {subscription_id}")
-
-    # --- Get Configuration from Environment ---
+    # --- Configuration Loading and Validation ---
     logger.info("Loading configuration from environment variables...")
+    subscription_id = get_current_subscription_id()
     resource_group_name = os.environ.get("AZURE_RESOURCE_GROUP")
-    remediation_enabled_str = os.environ.get("REMEDIATON_ENABLED", "false") # Default to false
+    remediation_enabled_str = os.environ.get("REMEDIATION_ENABLED", "false") # Default to false
     storage_accounts_str = os.environ.get("TARGET_STORAGE_ACCOUNTS")
     expected_workspace_id = os.environ.get("WORKSPACE_ID")
+    # Optional: Allow specifying API version via environment variable if needed
+    security_api_version = os.environ.get("SECURITY_API_VERSION") # No default, let SDK decide unless specified
 
-    # --- Validate Essential Configuration ---
     missing_vars = []
+    if not subscription_id: missing_vars.append("AZURE_SUBSCRIPTION_ID (or WEBSITE_OWNER_NAME)")
     if not resource_group_name: missing_vars.append("AZURE_RESOURCE_GROUP")
     if not storage_accounts_str: missing_vars.append("TARGET_STORAGE_ACCOUNTS")
     if not expected_workspace_id: missing_vars.append("WORKSPACE_ID")
-    if missing_vars:
-         logger.critical(f"Required environment variables missing: {', '.join(missing_vars)}. Exiting.")
-         sys.exit(1)
+    # REMEDIATION_ENABLED has a default, no need to check if missing
 
-    try:
-        set_storage_accounts = set(name.strip().lower() for name in storage_accounts_str.split(',') if name.strip()) # Normalize to lower case
-        remediation_enabled = remediation_enabled_str.lower() == "true"
-    except Exception as e:
-        logger.critical(f"Error processing configuration strings (TARGET_STORAGE_ACCOUNTS / REMEDIATON_ENABLED): {e}. Exiting.")
+    if missing_vars:
+        logger.critical(f"Missing required configuration: {', '.join(missing_vars)}. Exiting.")
         sys.exit(1)
 
-    logger.info(f"Target Resource Group: {resource_group_name}")
-    logger.info(f"Target Storage Accounts (lower case): {', '.join(set_storage_accounts)}")
-    logger.info(f"Remediation Enabled: {remediation_enabled}")
-    logger.info(f"Expected Workspace ID: {expected_workspace_id}")
+    try:
+        set_storage_accounts = set(name.strip() for name in storage_accounts_str.split(',') if name.strip())
+        if not set_storage_accounts:
+            raise ValueError("TARGET_STORAGE_ACCOUNTS cannot be empty.")
+    except Exception as e:
+        logger.critical(f"Invalid TARGET_STORAGE_ACCOUNTS format: {e}. Exiting.")
+        sys.exit(1)
 
-    # --- Initialize Azure Clients ---
+    remediation_enabled = remediation_enabled_str.lower() == "true"
+
+    logger.info(f"Subscription ID determined: {'*' * (len(subscription_id) - 4)}{subscription_id[-4:]}")
+    logger.info(f"Resource Group: {resource_group_name}")
+    logger.info(f"Target Storage Accounts: {', '.join(sorted(list(set_storage_accounts)))}")
+    logger.info(f"Expected Workspace ID: {expected_workspace_id}")
+    logger.info(f"Remediation Enabled: {remediation_enabled}")
+    if security_api_version:
+        logger.info(f"Using Security API Version (optional): {security_api_version}")
+    logger.info("Configuration loaded successfully.")
+
+    # --- Azure Client Initialization ---
+    logger.info("Initializing Azure clients...")
     try:
         credential = DefaultAzureCredential()
         resource_client = ResourceManagementClient(credential, subscription_id)
-        security_client = SecurityCenter(credential, subscription_id)
+        # Initialize SecurityCenter client - optionally with specified API version
+        if security_api_version:
+             security_client = SecurityCenter(credential, subscription_id, api_version=security_api_version)
+        else:
+             security_client = SecurityCenter(credential, subscription_id) # Use SDK default
         monitor_client = MonitorManagementClient(credential, subscription_id)
         logger.info("Azure clients initialized successfully.")
     except Exception as e:
-        logger.critical(f"Failed to initialize Azure clients. Check credentials/permissions. Error: {e}")
+        logger.critical(f"Failed to initialize Azure clients: {e}. Exiting.")
         sys.exit(1)
 
-    # --- List Resources ---
-    resources_iterator = [] # Initialize to prevent potential UnboundLocalError
+    # --- Process Storage Accounts ---
+    processed_accounts_count = 0
+    target_accounts_found_count = 0
+    logger.info(f"Starting processing for storage accounts in resource group '{resource_group_name}'...")
     try:
-        logger.info(f"Listing storage accounts in resource group '{resource_group_name}'...")
         resources_iterator = resource_client.resources.list_by_resource_group(
             resource_group_name,
             filter=f"resourceType eq '{STORAGE_ACCOUNT_TYPE}'"
         )
-    except HttpResponseError as hre:
-         logger.critical(f"CRITICAL ERROR: Failed to list resources (HTTP {hre.status_code}). Check permissions for RG '{resource_group_name}'. {hre.message}")
-         sys.exit(1)
+
+        for resource in resources_iterator:
+            if resource.name in set_storage_accounts:
+                target_accounts_found_count += 1
+                logger.info(f"Processing target account: {resource.name} (ID: {resource.id})...")
+
+                # Use the check_compliance function which now uses the user-confirmed attributes
+                check_results, _, defender_setting = check_compliance(
+                    security_client, monitor_client, resource, expected_workspace_id
+                )
+
+                # If defender_setting is None, indicates a critical failure during check_compliance get call
+                if defender_setting is None and not any(check_results.values()):
+                    logger.warning(f" -> Skipping {resource.name} due to critical errors during compliance check (API/Auth issue?).")
+                    continue
+
+                # Check if any compliance checks actually returned None (indicating an issue reading attributes)
+                if None in check_results.values():
+                     logger.warning(f" -> Skipping {resource.name} due to inability to read all compliance attributes (Attribute Error?).")
+                     continue
+
+
+                is_compliant = all(value is True for value in check_results.values()) # Explicitly check for True
+
+                if is_compliant:
+                    logger.info(f" -> {resource.name} is Compliant.")
+                else:
+                    logger.warning(f" -> {resource.name} is NOT Compliant.")
+                    for check_item, status in check_results.items():
+                        # Log failed or indeterminate checks
+                        if status is not True:
+                            logger.warning(f"    - {check_item}: {status}") # Log the actual status (False or None)
+
+                    if remediation_enabled:
+                         # Ensure defender_setting object exists before passing to remediation
+                         if defender_setting:
+                            remediation_orchestrator(
+                                security_client, defender_setting, monitor_client,
+                                resource, check_results, expected_workspace_id
+                            )
+                         else:
+                              logger.error(f" -> Cannot remediate {resource.name}: Defender Settings object is missing or invalid.")
+                    else:
+                        logger.info(f" -> Remediation is disabled. No changes made for {resource.name}.")
+                processed_accounts_count += 1
+
+    except HttpResponseError as e:
+         logger.error(f"Azure API error during resource listing or processing in RG '{resource_group_name}': {e.message}")
     except Exception as e:
-        logger.critical(f"CRITICAL ERROR: Failed to list resources. Error: {e}")
-        sys.exit(1)
+        logger.error(f"An unexpected error occurred during main processing loop: {e}", exc_info=True)
 
-    # --- Process Resources ---
-    logger.info("Starting compliance check and remediation loop...")
-    processed_count = 0
-    target_found_count = 0
+    # --- Final Summary ---
+    logger.info("Processing finished.")
+    if target_accounts_found_count < len(set_storage_accounts):
+         logger.warning(f"Found {target_accounts_found_count} of the {len(set_storage_accounts)} target storage account(s) in resource group '{resource_group_name}'.")
+    elif target_accounts_found_count == 0 and set_storage_accounts:
+         logger.warning(f"No storage accounts matching the target list were found in resource group '{resource_group_name}'.")
 
-    for resource in resources_iterator:
-        # Normalize resource name to lower case for comparison
-        resource_name_lower = resource.name.lower()
-        if resource_name_lower in set_storage_accounts:
-            target_found_count += 1
-            logger.info(f"Processing target account: {resource.name} (ID: {resource.id})")
-            check_results, diagnostic_setting, defender_setting = check_compliance(
-                security_client, monitor_client, resource, expected_workspace_id
-            )
-
-            # Check if base settings could be retrieved
-            if defender_setting is None:
-                logger.warning(f"   -> Skipping further checks and remediation for {resource.name} due to errors retrieving its settings.")
-                continue
-
-            # Log compliance status and details
-            if all(check_results.values()):
-                logger.info("   -> Compliant.")
-            else:
-                logger.warning("   -> Not Compliant.")
-                # Use standard loop for logging details
-                for key, value in check_results.items():
-                    if not value:
-                        logger.warning(f"        -> {key}: {value}")
-
-                # Trigger remediation if enabled and not compliant
-                if remediation_enabled:
-                    remediation_orchestrator(
-                        security_client,
-                        defender_setting, # Pass original object
-                        monitor_client,
-                        resource,
-                        check_results,
-                        expected_workspace_id
-                    )
-            processed_count += 1 # Count successful checks/remediations
-
-    # --- Summary Logging ---
-    logger.info(f"Finished processing loop.")
-    logger.info(f"Found and processed {target_found_count} out of {len(set_storage_accounts)} target account(s) in the resource group.")
-    if target_found_count < len(set_storage_accounts):
-        logger.warning(f"Could not find all target accounts in resource group '{resource_group_name}'. Verify TARGET_STORAGE_ACCOUNTS and resource group.")
-    logger.info(f"Script finished.")
+    logger.info(f"Successfully attempted processing for {processed_accounts_count} target storage account(s).") # Changed phrasing slightly
+    logger.info("Script finished.")
 
 
+# --- Script Entry Point ---
 if __name__ == "__main__":
     main()
